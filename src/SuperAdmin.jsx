@@ -3,13 +3,15 @@ import { Ban, Check, FileWarning, KeyRound, LayoutDashboard, LockKeyhole, Refres
 import { api, timeAgo } from './lib';
 import { Empty, FormError } from './ui';
 
-export default function SuperAdmin({user,notify}){
-  const [error,setError]=useState('');
-  const [tab,setTab]=useState('overview'),[search,setSearch]=useState(''),[overview,setOverview]=useState(null),[users,setUsers]=useState([]),[reports,setReports]=useState([]),[content,setContent]=useState({listings:[],posts:[]}),[loading,setLoading]=useState(false);
+export default function SuperAdmin({user,notify,initialTab='overview'}){
   const allowed=user?.isAdmin,permissions=user?.permissions||[];
   const has=permission=>user?.isSuperAdmin||permissions.includes(permission);
+  const tabAllowed=value=>value==='overview'||(value==='users'&&(has('users')||has('verification')))||(value==='reports'&&has('reports'))||(value==='content'&&has('listings'))||(value==='access'&&user?.isSuperAdmin);
+  const [error,setError]=useState('');
+  const [tab,setTab]=useState(tabAllowed(initialTab)?initialTab:'overview'),[search,setSearch]=useState(''),[overview,setOverview]=useState(null),[users,setUsers]=useState([]),[reports,setReports]=useState([]),[content,setContent]=useState({listings:[],posts:[]}),[loading,setLoading]=useState(false);
   async function load(){if(!allowed)return;setLoading(true);setError('');try{const [summary,members,flags,allContent]=await Promise.all([api('/admin/overview'),has('users')||has('verification')?api('/admin/users'):Promise.resolve([]),has('reports')?api('/admin/reports'):Promise.resolve([]),has('listings')?api('/admin/content'):Promise.resolve({listings:[],posts:[]})]);setOverview(summary);setUsers(members);setReports(flags);setContent(allContent);}catch(e){setError(e.message);}finally{setLoading(false);}}
   useEffect(()=>{load();},[allowed]);
+  useEffect(()=>{setTab(tabAllowed(initialTab)?initialTab:'overview');setSearch('');},[initialTab,user?.isSuperAdmin,permissions.join('|')]);
   async function setBlocked(member,blocked){try{await api(`/admin/users/${member.id}`,{method:'PATCH',body:{blocked}});notify(blocked?`${member.name} has been blocked.`:`${member.name} can access Nexora again.`);await load();}catch(e){notify(e.message);}}
   async function setVerified(member,verified){try{await api(`/admin/users/${member.id}/verification`,{method:'PATCH',body:{verified}});notify(`${member.name} is now ${verified?'verified':'unverified'}.`);await load();}catch(e){notify(e.message);}}
   async function setRole(member,permission,enabled){const next=enabled?[...new Set([...member.adminPermissions,permission])]:member.adminPermissions.filter(p=>p!==permission);try{await api(`/admin/roles/${member.id}`,{method:'PATCH',body:{permissions:next}});notify(next.length?`Admin access updated for ${member.name}.`:`Admin access removed from ${member.name}.`);await load();}catch(e){notify(e.message);}}

@@ -18,7 +18,14 @@ const hash=text=>createHash('sha256').update(text).digest('hex');
 const fail=(status,message)=>{const e=new Error(message);e.status=status;throw e;};
 function txt(value,label,max=2000,min=1){if(typeof value!=='string'||value.trim().length<min||value.trim().length>max)fail(400,`${label} must be ${min}–${max} characters.`);return value.trim();}
 function choice(value,options,label){if(!options.includes(value))fail(400,`Choose a valid ${label}.`);return value;}
-const publicUser=(u,role='member',permissions=[])=>({id:u.id,name:u.name,alias:u.alias,joined:u.created,verified:u.verified!==false,isAdmin:['admin','superadmin'].includes(role)||admins.includes(u.email),isSuperAdmin:role==='superadmin',permissions:role==='superadmin'?['reports','users','listings','verification','roles']:permissions});
+const standardAdminPermissions=['reports','users','listings','verification'];
+const publicUser=(u,role='member',permissions=[])=>{
+  const isSuperAdmin=role==='superadmin';
+  const isAdmin=isSuperAdmin||role==='admin'||admins.includes(u.email);
+  const resolvedRole=isSuperAdmin?'superadmin':isAdmin?'admin':'user';
+  const resolvedPermissions=isSuperAdmin?[...standardAdminPermissions,'roles']:admins.includes(u.email)?standardAdminPermissions:permissions;
+  return {id:u.id,name:u.name,alias:u.alias,joined:u.created,verified:u.verified!==false,role:resolvedRole,isAdmin,isSuperAdmin,permissions:resolvedPermissions};
+};
 const tokenFrom=req=>(req.headers.cookie||'').split(';').map(s=>s.trim()).find(s=>s.startsWith('nexora_session='))?.slice(15);
 const auth=(req,res,next)=>req.user?next():res.status(401).json({error:'Join your campus to continue.'});
 const member=(req,res,next)=>req.user?next():res.status(401).json({error:'Verify your email to access campus content.'});
