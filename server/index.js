@@ -2,7 +2,7 @@ import express from 'express';
 import { randomUUID, randomBytes, randomInt, createHash, timingSafeEqual, scryptSync } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { col, clean, closeDatabase } from './db.js';
+import { col, clean, closeDatabase, ensureDatabase } from './db.js';
 import { mailProvider, sendVerificationCode } from './mail.js';
 
 const app=express();
@@ -13,7 +13,7 @@ const legacyApiOrigin=normalizeOrigin(process.env.API_PUBLIC_ORIGIN);
 const publicOrigin=appOrigin||legacyApiOrigin;
 const admins=(process.env.ADMIN_EMAILS||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
 const superAdminEmail=(process.env.SUPER_ADMIN_EMAIL||'').trim().toLowerCase();
-if(production && (!mailProvider() || !appOrigin.startsWith('https://'))) throw new Error('Production requires SMTP or Resend email credentials plus an HTTPS APP_ORIGIN value.');
+if(production && appOrigin && !appOrigin.startsWith('https://')) console.warn('APP_ORIGIN should use HTTPS in production.');
 const hash=text=>createHash('sha256').update(text).digest('hex');
 const fail=(status,message)=>{const e=new Error(message);e.status=status;throw e;};
 function txt(value,label,max=2000,min=1){if(typeof value!=='string'||value.trim().length<min||value.trim().length>max)fail(400,`${label} must be ${min}–${max} characters.`);return value.trim();}
@@ -42,20 +42,43 @@ app.use((req,res,next)=>{res.setHeader('X-Content-Type-Options','nosniff');res.s
 app.use(express.json({limit:'5mb'}));
 app.use(async(req,res,next)=>{
   if(req.path.startsWith('/api'))res.setHeader('Cache-Control','no-store');
-  const allowed=(production?[appOrigin]:[appOrigin,'http://localhost:5173','http://127.0.0.1:5173','http://localhost:3001','http://127.0.0.1:3001']).map(normalizeOrigin).filter(Boolean);
-  if(req.headers.origin&&allowed.includes(req.headers.origin)){
+  const requestOrigin=normalizeOrigin(`${req.protocol}://${req.get('host')||''}`);
+  const allowed=(production?[appOrigin,requestOrigin]:[appOrigin,requestOrigin,'http://localhost:5173','http://127.0.0.1:5173','http://localhost:3001','http://127.0.0.1:3001']).map(normalizeOrigin).filter(Boolean);
+  if(req.headers.origin&&allowed.includes(normalizeOrigin(req.headers.origin))){
     res.setHeader('Access-Control-Allow-Origin',req.headers.origin);
     res.setHeader('Access-Control-Allow-Credentials','true');
     res.setHeader('Access-Control-Allow-Headers','Content-Type');
     res.setHeader('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS');
     res.setHeader('Vary','Origin');
   }
-  if(req.method==='OPTIONS')return req.headers.origin&&allowed.includes(req.headers.origin)?res.sendStatus(204):res.status(403).json({error:'This origin is not allowed.'});
-  if(!['GET','HEAD'].includes(req.method)&&req.headers.origin&&!allowed.includes(req.headers.origin))return res.status(403).json({error:'This origin is not allowed.'});
+  if(req.method==='OPTIONS')return req.headers.origin&&allowed.includes(normalizeOrigin(req.headers.origin))?res.sendStatus(204):res.status(403).json({error:'This origin is not allowed.'});
+  if(!['GET','HEAD'].includes(req.method)&&req.headers.origin&&!allowed.includes(normalizeOrigin(req.headers.origin)))return res.status(403).json({error:'This origin is not allowed.'});
+  next();
+});
+
+// Do not connect to MongoDB during module import. Vercel can create a fresh
+// serverless instance at any time; forcing Atlas to connect before Express is
+// ready makes harmless routes such as /api/config wait and can turn an Atlas
+// network issue into FUNCTION_INVOCATION_FAILED.
+app.use(async(req,res,next)=>{
+  if(!req.path.startsWith('/api'))return next();
+  const token=tokenFrom(req);
+  const databaseNotNeeded=req.path==='/api/config'||req.path==='/api/health'||(req.path==='/api/me'&&!token);
+  if(databaseNotNeeded)return next();
+  try{await ensureDatabase();next();}
+  catch(error){
+    console.error('MongoDB connection failed:',error.message);
+    res.status(503).json({error:'Database connection is unavailable. Check the MONGODB_URI environment variable and MongoDB Atlas Network Access.'});
+  }
+});
+
+app.use(async(req,res,next)=>{
+  if(!req.path.startsWith('/api')||req.path==='/api/config'||req.path==='/api/health')return next();
   const token=tokenFrom(req);
   if(token){const s=await col('sessions').findOne({token:hash(token),expires:{$gt:new Date()}});if(s){const user=await col('users').findOne({id:s.user_id});if(user?.blocked)await col('sessions').deleteOne({_id:s._id});else{const assignment=s.role==='superadmin'?null:await col('admin_roles').findOne({user_id:user.id});req.user=user;req.sessionRole=s.role==='superadmin'?'superadmin':assignment?'admin':'member';req.adminPermissions=assignment?.permissions||[];}}}
   next();
 });
+app.get('/api/health',(_req,res)=>res.json({ok:true,service:'Nexora API'}));
 app.get('/api/config',(req,res)=>res.json({campus:process.env.CAMPUS_NAME||'Nexora University',anyEmail:true,mailConfigured:!!mailProvider()}));
 app.get('/api/me',(req,res)=>res.json({user:req.user?publicUser(req.user,req.sessionRole,req.adminPermissions):null}));
 app.post('/api/auth/request',async(req,res)=>{
@@ -64,6 +87,7 @@ app.post('/api/auth/request',async(req,res)=>{
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))fail(400,'Enter a valid email address.');
   limit(`email:${email}`,3,900000);
   if(superAdminEmail&&email===superAdminEmail)return res.json({adminPasswordRequired:true,message:'Enter the administrator password to continue.'});
+  if(production&&!mailProvider())fail(503,'Email service is not configured on the server. Add SMTP or Resend variables in Vercel Environment Variables.');
   const code=String(randomInt(100000,1000000));
   await col('codes').updateOne({email},{$set:{hash:hash(code),expires:new Date(Date.now()+600000),attempts:0,name}},{upsert:true});
   if(mailProvider()){
