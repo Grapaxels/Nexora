@@ -7,9 +7,13 @@ import { mailProvider, sendVerificationCode } from './mail.js';
 
 const app=express();
 const production=process.env.NODE_ENV==='production';
+const normalizeOrigin=value=>(value||'').trim().replace(/\/$/,'');
+const appOrigin=normalizeOrigin(process.env.APP_ORIGIN);
+const legacyApiOrigin=normalizeOrigin(process.env.API_PUBLIC_ORIGIN);
+const publicOrigin=appOrigin||legacyApiOrigin;
 const admins=(process.env.ADMIN_EMAILS||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
 const superAdminEmail=(process.env.SUPER_ADMIN_EMAIL||'').trim().toLowerCase();
-if(production && (!mailProvider() || !process.env.APP_ORIGIN?.startsWith('https://') || !process.env.API_PUBLIC_ORIGIN?.startsWith('https://'))) throw new Error('Production requires SMTP or Resend email credentials plus HTTPS APP_ORIGIN and API_PUBLIC_ORIGIN values.');
+if(production && (!mailProvider() || !appOrigin.startsWith('https://'))) throw new Error('Production requires SMTP or Resend email credentials plus an HTTPS APP_ORIGIN value.');
 const hash=text=>createHash('sha256').update(text).digest('hex');
 const fail=(status,message)=>{const e=new Error(message);e.status=status;throw e;};
 function txt(value,label,max=2000,min=1){if(typeof value!=='string'||value.trim().length<min||value.trim().length>max)fail(400,`${label} must be ${min}–${max} characters.`);return value.trim();}
@@ -21,10 +25,10 @@ const member=(req,res,next)=>req.user?next():res.status(401).json({error:'Verify
 const superAdmin=(req,res,next)=>req.user&&req.sessionRole==='superadmin'?next():res.status(403).json({error:'Super administrator access required.'});
 const adminMember=(req,res,next)=>req.user&&(req.sessionRole==='admin'||req.sessionRole==='superadmin'||admins.includes(req.user.email))?next():res.status(403).json({error:'Administrator access required.'});
 const adminAccess=permission=>(req,res,next)=>req.user&&(req.sessionRole==='superadmin'||admins.includes(req.user.email)||req.adminPermissions?.includes(permission)||(permission==='users'&&req.adminPermissions?.includes('verification')))?next():res.status(403).json({error:'This administrator permission is required.'});
-const apiOrigin=(process.env.API_PUBLIC_ORIGIN||'').replace(/\/$/,'');
 function uploadPath(value){
   if(typeof value!=='string')return null;
-  const path=apiOrigin&&value.startsWith(apiOrigin)?value.slice(apiOrigin.length):value;
+  let path=value;
+  for(const origin of [publicOrigin,legacyApiOrigin].filter(Boolean))if(path.startsWith(origin)){path=path.slice(origin.length);break;}
   return /^\/api\/uploads\/[a-f0-9-]+\.(?:jpg|png|webp)$/.test(path)?path:null;
 }
 async function login(res,u,role='member',permissions=[]){const token=randomBytes(32).toString('hex');await col('sessions').insertOne({token:hash(token),user_id:u.id,role,expires:new Date(Date.now()+7*86400000)});res.cookie('nexora_session',token,{httpOnly:true,sameSite:'lax',secure:production,maxAge:7*86400000,path:'/'});return publicUser(u,role,permissions);}
@@ -33,11 +37,12 @@ const limits=new Map();
 function limit(key,max=10,window=60000){const now=Date.now(),item=limits.get(key);if(!item||item.until<now)limits.set(key,{count:1,until:now+window});else if(++item.count>max)fail(429,'Too many attempts. Please try again in a few minutes.');}
 setInterval(()=>{for(const [k,v] of limits)if(v.until<Date.now())limits.delete(k);},60000).unref();
 app.disable('x-powered-by');
+app.set('trust proxy',1);
 app.use((req,res,next)=>{res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','same-origin');res.setHeader('X-Frame-Options','DENY');res.setHeader('Permissions-Policy','camera=(), microphone=(), geolocation=()');if(production)res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");next();});
 app.use(express.json({limit:'5mb'}));
 app.use(async(req,res,next)=>{
   if(req.path.startsWith('/api'))res.setHeader('Cache-Control','no-store');
-  const allowed=(production?[process.env.APP_ORIGIN]:[process.env.APP_ORIGIN,'http://localhost:5173','http://127.0.0.1:5173','http://localhost:3001','http://127.0.0.1:3001','https://nexora.grapaxels.in/']).filter(Boolean);
+  const allowed=(production?[appOrigin]:[appOrigin,'http://localhost:5173','http://127.0.0.1:5173','http://localhost:3001','http://127.0.0.1:3001']).map(normalizeOrigin).filter(Boolean);
   if(req.headers.origin&&allowed.includes(req.headers.origin)){
     res.setHeader('Access-Control-Allow-Origin',req.headers.origin);
     res.setHeader('Access-Control-Allow-Credentials','true');
@@ -101,7 +106,7 @@ app.post('/api/uploads',auth,async(req,res)=>{
   const data=txt(req.body.data,'Image',4300000),match=data.match(/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/);if(!match)fail(400,'Choose a JPEG, PNG or WebP image.');
   const bytes=Buffer.from(match[2],'base64');if(bytes.length>3*1024*1024)fail(400,'Each photo must be under 3 MB.');
   const valid=match[1]==='jpeg'?bytes[0]===255&&bytes[1]===216&&bytes[2]===255:match[1]==='png'?bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])):bytes.subarray(0,4).toString()==='RIFF'&&bytes.subarray(8,12).toString()==='WEBP';if(!valid)fail(400,'The file is not a valid image.');
-  const name=`${randomUUID()}.${match[1]==='jpeg'?'jpg':match[1]}`,path=`/api/uploads/${name}`,url=production?`${apiOrigin}${path}`:path;
+  const name=`${randomUUID()}.${match[1]==='jpeg'?'jpg':match[1]}`,path=`/api/uploads/${name}`,url=production&&publicOrigin?`${publicOrigin}${path}`:path;
   await col('uploads').insertOne({url,name,user_id:req.user.id,contentType:`image/${match[1]}`,data:bytes,created:Date.now()});res.status(201).json({url});
 });
 app.get('/api/uploads/:name',member,async(req,res)=>{
