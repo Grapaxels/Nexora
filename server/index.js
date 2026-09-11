@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { col, clean, closeDatabase, ensureDatabase } from './db.js';
 import { mailProvider, sendVerificationCode } from './mail.js';
+import { applyGameMove, createGameState, gameById } from '../shared/arcadeGames.js';
 
 const app=express();
 const production=process.env.NODE_ENV==='production';
@@ -43,6 +44,65 @@ function validAdminPassword(value){const stored=process.env.SUPER_ADMIN_PASSWORD
 const limits=new Map();
 function limit(key,max=10,window=60000){const now=Date.now(),item=limits.get(key);if(!item||item.until<now)limits.set(key,{count:1,until:now+window});else if(++item.count>max)fail(429,'Too many attempts. Please try again in a few minutes.');}
 setInterval(()=>{for(const [k,v] of limits)if(v.until<Date.now())limits.delete(k);},60000).unref();
+
+const arcadeAlphabet='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const ARCADE_ROOM_CAPACITY=50;
+const ARCADE_MIN_PLAYERS=2;
+function arcadePlayer(req){
+  const raw=String(req.get('x-arcade-player')||'').trim();
+  if(!/^[A-Za-z0-9_-]{20,128}$/.test(raw))fail(400,'Acrade player session is missing. Refresh Acrade and try again.');
+  return hash(raw);
+}
+function arcadeGame(value){const game=gameById(value);if(!game)fail(400,'Choose a valid Acrade game.');return game;}
+function roomCode(){let value='';for(let i=0;i<6;i++)value+=arcadeAlphabet[randomInt(0,arcadeAlphabet.length)];return value;}
+function roomPlayerKeys(room){return (room.players||[]).map(p=>p.key);}
+function activeKeysFor(room){
+  const all=roomPlayerKeys(room),saved=(room.activeKeys||[]).filter(key=>all.includes(key));
+  if(saved.length>=2)return saved.slice(0,2);
+  return all.slice(0,Math.min(2,all.length));
+}
+function publicRoom(room,playerKey){
+  if(!room)fail(404,'Game room not found.');
+  const playerIndex=room.players?.findIndex(p=>p.key===playerKey)??-1;
+  if(playerIndex<0)fail(403,'You are not a player in this room.');
+  const activeKeys=activeKeysFor(room),seat=activeKeys.indexOf(playerKey),activeSet=new Set(activeKeys);
+  let queueNumber=0;
+  const players=room.players.map((p,i)=>{
+    const activeSeat=activeKeys.indexOf(p.key),waiting=activeSeat<0;
+    if(waiting)queueNumber+=1;
+    return {index:i,label:`Player ${i+1}`,role:waiting?'queued':'active',activeSeat:activeSeat<0?null:activeSeat,queuePosition:waiting?queueNumber:null};
+  });
+  const me=players[playerIndex];
+  return {id:room.id,code:room.code,gameId:room.gameId,mode:room.mode,status:room.status,seat,playerIndex,playerCount:room.players.length,capacity:ARCADE_ROOM_CAPACITY,minPlayers:ARCADE_MIN_PLAYERS,queuePosition:me?.queuePosition||null,players,activePlayers:players.filter(p=>p.role==='active'),queuedCount:players.filter(p=>p.role==='queued').length,state:room.state,round:room.round||1,version:room.version||0,created:room.created,updated:room.updated,abandoned:!!room.abandoned};
+}
+async function createArcadeRoom(gameId,playerKey,mode='private'){
+  arcadeGame(gameId);const now=Date.now();
+  for(let attempt=0;attempt<8;attempt++){
+    const room={id:randomUUID(),code:roomCode(),gameId,mode,status:'waiting',players:[{key:playerKey,joined:now}],activeKeys:[playerKey],rotationCursor:0,state:createGameState(gameId),round:1,version:0,created:now,updated:now,expiresAt:new Date(now+2*60*60*1000)};
+    try{await col('arcade_rooms').insertOne(room);return room;}catch(error){if(error?.code!==11000)throw error;}
+  }
+  fail(503,'Could not create a unique room code. Please try again.');
+}
+async function activateArcadeRoom(room){
+  if(!room)return room;
+  const all=roomPlayerKeys(room);
+  if(all.length<ARCADE_MIN_PLAYERS){
+    if(room.status!=='waiting'||(room.activeKeys||[]).length!==all.length){await col('arcade_rooms').updateOne({id:room.id},{$set:{status:'waiting',activeKeys:all,state:createGameState(room.gameId),updated:Date.now()},$inc:{version:1}});return col('arcade_rooms').findOne({id:room.id});}
+    return room;
+  }
+  if(room.status==='waiting'){
+    const now=Date.now();
+    await col('arcade_rooms').updateOne({id:room.id,status:'waiting'},{$set:{status:'active',activeKeys:all.slice(0,2),rotationCursor:0,state:createGameState(room.gameId),updated:now,expiresAt:new Date(now+2*60*60*1000)},$inc:{version:1}});
+    return col('arcade_rooms').findOne({id:room.id});
+  }
+  return room;
+}
+function nextActivePair(room){
+  const keys=roomPlayerKeys(room),count=keys.length;if(count<2)return keys;
+  const current=activeKeysFor(room);let cursor=Number.isInteger(room.rotationCursor)?room.rotationCursor:0;
+  if(current.length===2){const second=keys.indexOf(current[1]);if(second>=0)cursor=(second+1)%count;else cursor=(cursor+2)%count;}
+  return [keys[cursor],keys[(cursor+1)%count]];
+}
 app.disable('x-powered-by');
 app.set('trust proxy',1);
 app.use((req,res,next)=>{res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','same-origin');res.setHeader('X-Frame-Options','DENY');res.setHeader('Permissions-Policy','camera=(), microphone=(), geolocation=()');if(production)res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");next();});
@@ -54,7 +114,7 @@ app.use(async(req,res,next)=>{
   if(req.headers.origin&&allowed.includes(normalizeOrigin(req.headers.origin))){
     res.setHeader('Access-Control-Allow-Origin',req.headers.origin);
     res.setHeader('Access-Control-Allow-Credentials','true');
-    res.setHeader('Access-Control-Allow-Headers','Content-Type');
+    res.setHeader('Access-Control-Allow-Headers','Content-Type, X-Arcade-Player');
     res.setHeader('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS');
     res.setHeader('Vary','Origin');
   }
@@ -88,6 +148,57 @@ app.use(async(req,res,next)=>{
 app.get('/api/health',(_req,res)=>res.json({ok:true,service:'Nexora API'}));
 app.get('/api/config',(req,res)=>res.json({campus:process.env.CAMPUS_NAME||'Nexora University',anyEmail:true,mailConfigured:!!mailProvider()}));
 app.get('/api/me',(req,res)=>res.json({user:req.user?publicUser(req.user,req.sessionRole,req.adminPermissions):null}));
+
+// Acrade online rooms use MongoDB-backed turn state instead of WebSockets so
+// they work reliably on Vercel serverless functions. Rooms accept 2–50
+// anonymous participants. The two active seats play the current head-to-head
+// round; everyone else stays in the challenger queue and rotates in next round.
+app.post('/api/arcade/rooms',async(req,res)=>{
+  limit(`arcade-create:${req.ip}`,30,60000);const playerKey=arcadePlayer(req),gameId=arcadeGame(req.body.gameId).id;
+  const existing=await col('arcade_rooms').findOne({gameId,mode:'private','players.key':playerKey,expiresAt:{$gt:new Date()}});
+  const room=existing||await createArcadeRoom(gameId,playerKey,'private');res.status(existing?200:201).json(publicRoom(await activateArcadeRoom(room),playerKey));
+});
+app.post('/api/arcade/match',async(req,res)=>{
+  limit(`arcade-match:${req.ip}`,50,60000);const playerKey=arcadePlayer(req),gameId=arcadeGame(req.body.gameId).id,now=Date.now();
+  const own=await col('arcade_rooms').findOne({gameId,mode:'quick','players.key':playerKey,expiresAt:{$gt:new Date()}});if(own)return res.json(publicRoom(await activateArcadeRoom(own),playerKey));
+  const joinUpdate={$push:{players:{key:playerKey,joined:now}},$set:{updated:now,expiresAt:new Date(now+2*60*60*1000)},$inc:{version:1}};
+  let result=await col('arcade_rooms').findOneAndUpdate({gameId,mode:'quick',status:'waiting','players.49':{$exists:false},'players.key':{$ne:playerKey},expiresAt:{$gt:new Date()}},joinUpdate,{sort:{created:1},returnDocument:'after'});
+  let joined=result?.value??result;
+  if(!joined){result=await col('arcade_rooms').findOneAndUpdate({gameId,mode:'quick',status:'active','players.49':{$exists:false},'players.key':{$ne:playerKey},expiresAt:{$gt:new Date()}},joinUpdate,{sort:{created:1},returnDocument:'after'});joined=result?.value??result;}
+  if(joined)return res.json(publicRoom(await activateArcadeRoom(joined),playerKey));
+  const room=await createArcadeRoom(gameId,playerKey,'quick');res.status(201).json(publicRoom(room,playerKey));
+});
+app.post('/api/arcade/rooms/join',async(req,res)=>{
+  limit(`arcade-join:${req.ip}`,70,60000);const playerKey=arcadePlayer(req),code=txt(String(req.body.code||'').toUpperCase(),'Room code',6,6);if(!/^[A-Z2-9]{6}$/.test(code))fail(400,'Enter a valid six-character room code.');
+  const current=await col('arcade_rooms').findOne({code,expiresAt:{$gt:new Date()}});if(!current)fail(404,'That room code was not found or has expired.');
+  if(current.players.some(p=>p.key===playerKey))return res.json(publicRoom(await activateArcadeRoom(current),playerKey));
+  if(current.players.length>=ARCADE_ROOM_CAPACITY)fail(409,'That Acrade room is full. Rooms support up to 50 players.');
+  const now=Date.now(),result=await col('arcade_rooms').findOneAndUpdate({id:current.id,'players.49':{$exists:false},'players.key':{$ne:playerKey}},{$push:{players:{key:playerKey,joined:now}},$set:{updated:now,expiresAt:new Date(now+2*60*60*1000)},$inc:{version:1}},{returnDocument:'after'});
+  const joined=result?.value??result;if(!joined)fail(409,'The room changed while you were joining. Try the code again.');res.json(publicRoom(await activateArcadeRoom(joined),playerKey));
+});
+app.get('/api/arcade/rooms/:id',async(req,res)=>{const playerKey=arcadePlayer(req),room=await col('arcade_rooms').findOne({id:req.params.id,expiresAt:{$gt:new Date()}});res.json(publicRoom(await activateArcadeRoom(room),playerKey));});
+app.post('/api/arcade/rooms/:id/move',async(req,res)=>{
+  limit(`arcade-move:${req.ip}`,180,60000);const playerKey=arcadePlayer(req),room=await col('arcade_rooms').findOne({id:req.params.id,expiresAt:{$gt:new Date()}});if(!room)fail(404,'Game room not found.');
+  const activeKeys=activeKeysFor(room),seat=activeKeys.indexOf(playerKey);if(!room.players.some(p=>p.key===playerKey))fail(403,'You are not a player in this room.');if(seat<0)fail(409,'You are in the challenger queue. Your turn starts in a future round.');if(room.status!=='active'||room.players.length<ARCADE_MIN_PLAYERS)fail(409,'This game is not active yet.');if(room.state.finished)fail(409,'This round is already finished.');if(room.state.current!==seat)fail(409,'Wait for the other active player to move.');
+  let next;try{next=applyGameMove(room.state,req.body.move);}catch(error){fail(400,error.message||'That move is not allowed.');}
+  const now=Date.now(),result=await col('arcade_rooms').updateOne({id:room.id,version:room.version||0,status:'active'},{$set:{state:next,status:next.finished?'finished':'active',updated:now,expiresAt:new Date(now+2*60*60*1000)},$inc:{version:1}});if(!result.modifiedCount)fail(409,'The room changed before your move was saved. Refreshing will resync it.');
+  const updated=await col('arcade_rooms').findOne({id:room.id});res.json(publicRoom(updated,playerKey));
+});
+app.post('/api/arcade/rooms/:id/next',async(req,res)=>{
+  limit(`arcade-next:${req.ip}`,45,60000);const playerKey=arcadePlayer(req),room=await col('arcade_rooms').findOne({id:req.params.id,expiresAt:{$gt:new Date()}});if(!room)fail(404,'Game room not found.');
+  if(!room.players.some(p=>p.key===playerKey))fail(403,'You are not a player in this room.');if(room.players.length<2)fail(409,'At least two players are required for a round.');if(room.status!=='finished'&&!room.state?.finished)fail(409,'Finish the current round before starting the next one.');
+  const activeKeys=nextActivePair(room),keys=roomPlayerKeys(room),cursor=Math.max(0,keys.indexOf(activeKeys[0])),now=Date.now();
+  const result=await col('arcade_rooms').updateOne({id:room.id,version:room.version||0},{$set:{activeKeys,rotationCursor:cursor,state:createGameState(room.gameId),status:'active',abandoned:false,updated:now,expiresAt:new Date(now+2*60*60*1000)},$inc:{round:1,version:1}});if(!result.modifiedCount)fail(409,'Another player already started the next round.');
+  res.json(publicRoom(await col('arcade_rooms').findOne({id:room.id}),playerKey));
+});
+app.post('/api/arcade/rooms/:id/leave',async(req,res)=>{
+  const playerKey=arcadePlayer(req),room=await col('arcade_rooms').findOne({id:req.params.id});if(!room)return res.json({ok:true});if(!room.players.some(p=>p.key===playerKey))return res.json({ok:true});
+  await col('arcade_rooms').updateOne({id:room.id},{$pull:{players:{key:playerKey}},$set:{updated:Date.now()},$inc:{version:1}});let updated=await col('arcade_rooms').findOne({id:room.id});if(!updated)return res.json({ok:true});
+  if(!updated.players.length){await col('arcade_rooms').deleteOne({id:room.id});return res.json({ok:true});}
+  const remaining=roomPlayerKeys(updated),wasActive=(room.activeKeys||[]).includes(playerKey);
+  if(remaining.length<2){await col('arcade_rooms').updateOne({id:room.id},{$set:{status:'waiting',activeKeys:remaining,state:createGameState(room.gameId),rotationCursor:0,updated:Date.now()},$inc:{version:1}});return res.json({ok:true});}
+  if(wasActive){const activeKeys=remaining.slice(0,2);await col('arcade_rooms').updateOne({id:room.id},{$set:{status:'active',activeKeys,rotationCursor:0,state:createGameState(room.gameId),abandoned:true,updated:Date.now()},$inc:{round:1,version:1}});}res.json({ok:true});
+});
 app.post('/api/auth/request',async(req,res)=>{
   limit(`auth:${req.ip}`,10,900000);
   const email=txt(req.body.email,'Email',254).toLowerCase(),name=txt(req.body.name,'Name',60);

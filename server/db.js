@@ -58,6 +58,10 @@ async function createIndexes() {
       { buyer_id: 1, seller_id: 1, listing_id: 1, anonymous: 1 },
       { unique: true },
     ),
+    db.collection('arcade_rooms').createIndex({ id: 1 }, { unique: true }),
+    db.collection('arcade_rooms').createIndex({ code: 1 }, { unique: true }),
+    db.collection('arcade_rooms').createIndex({ gameId: 1, mode: 1, status: 1, created: 1 }),
+    db.collection('arcade_rooms').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     ...['listings', 'posts', 'comments', 'conversations', 'messages', 'reports'].map(name =>
       db.collection(name).createIndex({ id: 1 }, { unique: true }),
     ),

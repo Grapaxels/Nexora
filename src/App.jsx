@@ -33,7 +33,7 @@ export default function App(){
   const role=user?.role||(user?.isSuperAdmin?'superadmin':user?.isAdmin?'admin':'user');
   const permissions=user?.permissions||[];
   const hasAdminPermission=permission=>role==='superadmin'||permissions.includes(permission);
-  const campusLinks=[['marketplace','Marketplace',ShoppingBag],['pulse','Campus Pulse',MessageCircle],['free','Free finds',Gift],['wanted','Want to buy',ArrowLeftRight],['semester','Semester-end',GraduationCap],['arcade','Offline arcade',Gamepad2]];
+  const campusLinks=[['marketplace','Marketplace',ShoppingBag],['pulse','Campus Pulse',MessageCircle],['free','Free finds',Gift],['wanted','Want to buy',ArrowLeftRight],['semester','Semester-end',GraduationCap],['arcade','Acrade',Gamepad2]];
   const personalLinks=[['messages','Messages',MessageCircle],['saved','Saved items',Heart],['my-listings','My listings',Package]];
   const adminLinks=role==='superadmin'?
     [['admin','Overview',ShieldCheck],['admin-users','Users',Users],['admin-reports','Reports',Flag],['admin-content','Content',Package],['admin-access','Admin access',KeyRound]]:
