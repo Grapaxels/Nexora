@@ -50,3 +50,6 @@ next-env.d.ts
 /android/build/
 /android/app/build/
 /android/local.properties
+
+# Local MongoDB storage and user uploads
+/data/

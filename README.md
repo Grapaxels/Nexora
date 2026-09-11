@@ -1,28 +1,29 @@
-# Nexora
+# Nexora Campus Marketplace
 
-Nexora connects people seeking flexible local work with businesses that need short-term help.
+Nexora is a college-exclusive marketplace and community space. Verified students can buy, sell, exchange, or give away items, then connect through private messages or anonymous Campus Pulse conversations.
 
-## Deploy on Vercel
+## What is included
 
-1. Import this GitHub repository in Vercel as a Next.js project.
-2. Create a Turso database and add a connection using the SQLite-compatible libSQL endpoint.
-3. In Vercel project settings, add the variables listed in .env.example.
-4. Run the SQL in drizzle/0000_smart_maddog.sql once against the Turso database.
-5. Deploy, then add nexora.grapaxels.in as the Vercel custom domain.
+- Searchable marketplace with category, condition, price, and listing-type filters
+- Product photo uploads, seller profiles, saved items, and sold status
+- Free finds, want-to-buy posts, and a semester-end marketplace
+- Anonymous Campus Pulse posts, voting, comments, and private connections
+- Participant, report submission, and administrator review tools
+- College-email verification with expiring one-time codes
+- MongoDB persistence using the `Nexora` database
 
-## Required environment variables
+## Local setup
 
-| Variable | Purpose |
-| --- | --- |
-| DATABASE_URL | Turso/libSQL SQLite URL, for example libsql://nexora-your-org.turso.io |
-| DATABASE_AUTH_TOKEN | Turso database token |
-| APP_ORIGIN | Public web address: https://nexora.grapaxels.in |
-| ADMIN_EMAIL | Nexora administrator email |
+1. Install Node.js 22 or newer and run `npm install`.
+2. Copy `.env.example` to `.env`.
+3. Set `MONGODB_URI` to your MongoDB Atlas connection string. The database name is controlled by `MONGODB_DB=Nexora`.
+4. Add your exact college domains to `COLLEGE_DOMAINS` and Resend settings for email delivery.
+5. Run `npm run dev`, then open `http://127.0.0.1:5173`.
 
-Optional sign-in and email variables are documented in .env.example. For each OAuth app, set the callback URL to https://nexora.grapaxels.in/api/auth/callback/<provider>.
+When `MONGODB_URI` is empty in development, Nexora starts a local MongoDB process with persistent storage under `data/`. Local demo accounts and sample content are enabled by `DEMO_MODE=true`; production always disables them.
 
-## Local development
+## Production
 
-Run npm install, then npm run dev.
+Set `NODE_ENV=production`, `APP_ORIGIN` to the public HTTPS origin, and provide `MONGODB_URI`, `COLLEGE_DOMAINS`, `RESEND_API_KEY`, and `MAIL_FROM`. Add verified moderator emails to `ADMIN_EMAILS`. Build with `npm run build` and start the combined API and static server with `npm start`.
 
-The app uses hosted SQLite rather than a local database file so accounts, jobs, applications, payments, and ratings persist across Vercel serverless invocations.
+Credentials belong in `.env`, which is excluded from Git. See `.env.example` for all supported settings.
