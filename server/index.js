@@ -37,7 +37,7 @@ app.use((req,res,next)=>{res.setHeader('X-Content-Type-Options','nosniff');res.s
 app.use(express.json({limit:'5mb'}));
 app.use(async(req,res,next)=>{
   if(req.path.startsWith('/api'))res.setHeader('Cache-Control','no-store');
-  const allowed=(production?[process.env.APP_ORIGIN]:[process.env.APP_ORIGIN,'http://localhost:5173','http://127.0.0.1:5173','http://localhost:3001','http://127.0.0.1:3001']).filter(Boolean);
+  const allowed=(production?[process.env.APP_ORIGIN]:[process.env.APP_ORIGIN,'http://localhost:5173','http://127.0.0.1:5173','http://localhost:3001','http://127.0.0.1:3001','https://nexora.grapaxels.in/']).filter(Boolean);
   if(req.headers.origin&&allowed.includes(req.headers.origin)){
     res.setHeader('Access-Control-Allow-Origin',req.headers.origin);
     res.setHeader('Access-Control-Allow-Credentials','true');
