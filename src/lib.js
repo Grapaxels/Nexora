@@ -1,6 +1,7 @@
 export async function api(path, options = {}) {
   let response;
-  try { response = await fetch(`/api${path}`, { credentials: 'same-origin', ...options, headers: { 'Content-Type': 'application/json', ...options.headers }, body: options.body ? JSON.stringify(options.body) : undefined }); }
+  const origin = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+  try { response = await fetch(`${origin}/api${path}`, { credentials: 'include', ...options, headers: { 'Content-Type': 'application/json', ...options.headers }, body: options.body ? JSON.stringify(options.body) : undefined }); }
   catch { throw new Error('Unable to reach Nexora. Check your connection and try again.'); }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) { const error = new Error(data.error || 'Something went wrong. Please try again.'); error.status = response.status; throw error; }
