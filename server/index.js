@@ -4,13 +4,13 @@ import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { col, clean, closeDatabase } from './db.js';
 import { seed } from './seed.js';
+import { mailProvider, sendVerificationCode } from './mail.js';
 
 const app=express();
 const production=process.env.NODE_ENV==='production';
 const demo=!production && process.env.DEMO_MODE!=='false';
-const domains=(process.env.COLLEGE_DOMAINS||'nexora.edu').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
 const admins=(process.env.ADMIN_EMAILS||'').split(',').map(s=>s.trim().toLowerCase());
-if(production && (!process.env.RESEND_API_KEY || !process.env.COLLEGE_DOMAINS || !process.env.APP_ORIGIN?.startsWith('https://'))) throw new Error('Production requires RESEND_API_KEY, COLLEGE_DOMAINS and an HTTPS APP_ORIGIN.');
+if(production && (!mailProvider() || !process.env.APP_ORIGIN?.startsWith('https://'))) throw new Error('Production requires SMTP or Resend email credentials and an HTTPS APP_ORIGIN.');
 if(demo) await seed();
 const hash=text=>createHash('sha256').update(text).digest('hex');
 const fail=(status,message)=>{const e=new Error(message);e.status=status;throw e;};
@@ -19,7 +19,7 @@ function choice(value,options,label){if(!options.includes(value))fail(400,`Choos
 const publicUser=u=>({id:u.id,name:u.name,alias:u.alias,joined:u.created,isAdmin:admins.includes(u.email),isDemo:u.id.startsWith('demo-')});
 const tokenFrom=req=>(req.headers.cookie||'').split(';').map(s=>s.trim()).find(s=>s.startsWith('nexora_session='))?.slice(15);
 const auth=(req,res,next)=>req.user?next():res.status(401).json({error:'Join your campus to continue.'});
-const member=(req,res,next)=>demo||req.user?next():res.status(401).json({error:'Verify your college email to access campus content.'});
+const member=(req,res,next)=>demo||req.user?next():res.status(401).json({error:'Verify your email to access campus content.'});
 async function login(res,u){const token=randomBytes(32).toString('hex');await col('sessions').insertOne({token:hash(token),user_id:u.id,expires:new Date(Date.now()+7*86400000)});res.cookie('nexora_session',token,{httpOnly:true,sameSite:'lax',secure:production,maxAge:7*86400000,path:'/'});return publicUser(u);}
 const limits=new Map();
 function limit(key,max=10,window=60000){const now=Date.now(),item=limits.get(key);if(!item||item.until<now)limits.set(key,{count:1,until:now+window});else if(++item.count>max)fail(429,'Too many attempts. Please try again in a few minutes.');}
@@ -37,21 +37,21 @@ app.use(async(req,res,next)=>{
   if(token){const s=await col('sessions').findOne({token:hash(token),expires:{$gt:new Date()}});if(s)req.user=await col('users').findOne({id:s.user_id});}
   next();
 });
-app.get('/api/config',(req,res)=>res.json({campus:process.env.CAMPUS_NAME||'Nexora University',domains,demo,mailConfigured:!!process.env.RESEND_API_KEY}));
+app.get('/api/config',(req,res)=>res.json({campus:process.env.CAMPUS_NAME||'Nexora University',anyEmail:true,demo,mailConfigured:!!mailProvider()}));
 app.get('/api/me',(req,res)=>res.json({user:req.user?publicUser(req.user):null}));
 app.post('/api/auth/demo',async(req,res)=>{if(!demo)fail(404,'Not available.');res.json({user:await login(res,await col('users').findOne({id:'demo-student'}))});});
 app.post('/api/auth/request',async(req,res)=>{
   limit(`auth:${req.ip}`,10,900000);
   const email=txt(req.body.email,'Email',254).toLowerCase(),name=txt(req.body.name,'Name',60);
-  if(!/^[^\s@]+@[^\s@]+$/.test(email)||!domains.includes(email.split('@')[1]))fail(400,`Use your college email: ${domains.map(d=>'@'+d).join(', ')}.`);
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))fail(400,'Enter a valid email address.');
   limit(`email:${email}`,3,900000);
   const code=String(randomInt(100000,1000000));
   await col('codes').updateOne({email},{$set:{hash:hash(code),expires:new Date(Date.now()+600000),attempts:0,name}},{upsert:true});
-  if(process.env.RESEND_API_KEY){
-    try{const sent=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${process.env.RESEND_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({from:process.env.MAIL_FROM,to:[email],subject:'Your Nexora sign-in code',text:`Your Nexora code is ${code}. It expires in 10 minutes. If you did not request it, ignore this email.`})});if(!sent.ok)throw new Error('Mail provider rejected the request.');}
+  if(mailProvider()){
+    try{await sendVerificationCode({to:email,code});}
     catch{await col('codes').deleteOne({email});fail(503,'Email could not be sent. Please try again later.');}
   }else console.log(`[Nexora development sign-in] ${email}: ${code}`);
-  res.json({message:process.env.RESEND_API_KEY?'Check your college inbox for a six-digit code.':'Development mode: your code is in the API terminal. No email was sent.'});
+  res.json({message:mailProvider()?'Check your email inbox for a six-digit code.':'Development mode: your code is in the API terminal. No email was sent.'});
 });
 app.post('/api/auth/verify',async(req,res)=>{
   limit(`verify:${req.ip}`,20,900000);
